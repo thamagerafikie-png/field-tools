@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Magnetic Field Mapper</title>
+<style>
+  body{margin:0;background:#0b0f14;color:#e6edf3;font-family:sans-serif;text-align:center}
+  #top{padding:10px}
+  #val{font-size:48px;font-weight:bold}
+  #status{font-size:13px;opacity:.7}
+  canvas{background:#05080c;border:1px solid #222;width:96vw;height:60vh;touch-action:none}
+  button{font-size:16px;padding:10px 16px;margin:4px;border-radius:8px;border:0;background:#1f6feb;color:#fff}
+  .alert{color:#ff5555}
+</style>
+</head>
+<body>
+<div id="top">
+  <div id="val">-- µT</div>
+  <div id="status">Press Start</div>
+  <button id="start">Start</button>
+  <button id="calib">Set baseline</button>
+  <button id="save">Save track</button>
+  <button id="clear">Clear</button>
+</div>
+<canvas id="map"></canvas>
+
+<script>
+const $=id=>document.getElementById(id);
+const cv=$('map'), ctx=cv.getContext('2d');
+let pts=[], baseline=null, cur=0, pos=null, origin=null, running=false;
+
+function resize(){cv.width=cv.clientWidth*devicePixelRatio;cv.height=cv.clientHeight*devicePixelRatio}
+resize(); addEventListener('resize',resize);
+
+// metres east/north from the first GPS fix
+function toXY(lat,lon){
+  const R=6371000, d=Math.PI/180;
+  const x=(lon-origin.lon)*d*R*Math.cos(origin.lat*d);
+  const y=(lat-origin.lat)*d*R;
+  return {x,y};
+}
+
+// blue = normal, green/yellow = mild, red = strong anomaly
+function colour(dev){
+  const t=Math.min(dev/40,1);
+  const hue=240-240*t;
+  return `hsl(${hue},100%,50%)`;
+}
+
+function beep(dev){
+  if(!window.AudioContext) return;
+  const a=beep.a||(beep.a=new AudioContext());
+  const o=a.createOscillator(), g=a.createGain();
+  o.frequency.value=300+dev*15; g.gain.value=0.05;
+  o.connect(g); g.connect(a.destination);
+  o.start(); o.stop(a.currentTime+0.08);
+}
+
+function draw(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(!pts.length) return;
+  let minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9;
+  pts.forEach(p=>{minx=Math.min(minx,p.x);maxx=Math.max(maxx,p.x);miny=Math.min(miny,p.y);maxy=Math.max(maxy,p.y)});
+  const pad=20*devicePixelRatio;
+  const span=Math.max(maxx-minx,maxy-miny,10);
+  const s=(Math.min(cv.width,cv.height)-2*pad)/span;
+  pts.forEach(p=>{
+    const X=pad+(p.x-minx)*s, Y=cv.height-pad-(p.y-miny)*s;
+    ctx.beginPath();
+    ctx.fillStyle=colour(p.dev);
+    ctx.globalAlpha=0.8;
+    ctx.arc(X,Y,8*devicePixelRatio,0,7);
+    ctx.fill();
+  });
+  ctx.globalAlpha=1;
+  const l=pts[pts.length-1];
+  ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.beginPath();
+  ctx.arc(pad+(l.x-minx)*s,cv.height-pad-(l.y-miny)*s,12*devicePixelRatio,0,7);ctx.stroke();
+}
+
+function record(){
+  if(!pos||!running) return;
+  if(!origin) origin={lat:pos.latitude,lon:pos.longitude};
+  const {x,y}=toXY(pos.latitude,pos.longitude);
+  const dev=baseline===null?0:Math.abs(cur-baseline);
+  const last=pts[pts.length-1];
+  // only add a point if we moved at least 1 metre
+  if(last && Math.hypot(x-last.x,y-last.y)<1) return;
+  pts.push({x,y,mag:cur,dev,lat:pos.latitude,lon:pos.longitude,t:Date.now()});
+  if(dev>25){beep(dev);$('val').classList.add('alert')}else $('val').classList.remove('alert');
+  draw();
+}
+
+$('start').onclick=()=>{
+  if(!('Magnetometer' in window)){
+    $('status').textContent='Magnetometer not available. Use Chrome on Android over HTTPS.';
+    return;
+  }
+  try{
+    const m=new Magnetometer({frequency:10});
+    m.onreading=()=>{
+      cur=Math.sqrt(m.x*m.x+m.y*m.y+m.z*m.z);
+      $('val').textContent=cur.toFixed(1)+' µT';
+      if(baseline!==null) $('status').textContent='Deviation: '+Math.abs(cur-baseline).toFixed(1)+' µT   Points: '+pts.length;
+      record();
+    };
+    m.onerror=e=>$('status').textContent='Sensor error: '+e.error.message;
+    m.start();
+  }catch(e){$('status').textContent='Blocked: '+e.message;return}
+  navigator.geolocation.watchPosition(p=>{pos=p.coords},e=>$('status').textContent='GPS: '+e.message,{enableHighAccuracy:true,maximumAge:0});
+  running=true;
+  $('status').textContent='Walk to a clean spot, then press Set baseline';
+};
+
+$('calib').onclick=()=>{baseline=cur;$('status').textContent='Baseline set at '+cur.toFixed(1)+' µT. Now walk slowly.'};
+$('clear').onclick=()=>{pts=[];origin=null;draw()};
+$('save').onclick=()=>{
+  const blob=new Blob([JSON.stringify(pts)],{type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download='mag-track-'+Date.now()+'.json';a.click();
+};
+</script>
+</body>
+</html>
